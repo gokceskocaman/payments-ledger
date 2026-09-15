@@ -1,0 +1,43 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: payment-service
+
+  # Own database, own credentials. payment-service must never read account-service's tables.
+  datasource:
+    url: jdbc:postgresql://localhost:5434/payment
+    username: payment
+    password: payment
+
+  jpa:
+    # Flyway owns the schema; Hibernate is only allowed to check that it matches the entities.
+    hibernate:
+      ddl-auto: validate
+    # No lazy loading in the web layer: every query must be inside a service transaction.
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  health:
+    db:
+      enabled: true
+
+logging:
+  level:
+    org.flywaydb: info

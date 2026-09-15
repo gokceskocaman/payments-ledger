@@ -1,0 +1,14 @@
+# Single source of truth for versions across all modules.
+# Library versions that the Spring Boot BOM already manages are deliberately NOT listed here.
+
+[versions]
+kotlin = "2.1.21"
+springBoot = "3.5.0"
+springDependencyManagement = "1.1.7"
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-spring = { id = "org.jetbrains.kotlin.plugin.spring", version.ref = "kotlin" }
+kotlin-jpa = { id = "org.jetbrains.kotlin.plugin.jpa", version.ref = "kotlin" }
+spring-boot = { id = "org.springframework.boot", version.ref = "springBoot" }
+spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "springDependencyManagement" }
