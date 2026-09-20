@@ -50,6 +50,13 @@ class AccountServiceClient(private val restClient: RestClient) {
         // Read timeout, connect timeout, connection reset: the request may well have been executed.
         log.warn("Transfer {} gave no answer: {}", transferId, e.message)
         TransferOutcome.Indeterminate(e.message ?: "no response from account-service")
+    } catch (e: Exception) {
+        // Deliberately broad. This method's contract is to return an outcome, never to throw: a
+        // leaked exception becomes a 500, and a caller who gets a 500 cannot tell whether their
+        // money moved. A read timeout on the JDK HTTP client, for instance, surfaces as a
+        // CancellationException rather than the IOException Spring usually translates.
+        log.warn("Transfer {} failed unexpectedly ({}): {}", transferId, e.javaClass.simpleName, e.message)
+        TransferOutcome.Indeterminate("${e.javaClass.simpleName}: ${e.message}")
     }
 
     private fun outcomeOf(status: HttpStatusCode, body: JsonNode?, transferId: UUID): TransferOutcome =

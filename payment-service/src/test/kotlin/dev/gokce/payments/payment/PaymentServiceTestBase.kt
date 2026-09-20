@@ -9,6 +9,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.testcontainers.containers.PostgreSQLContainer
+import org.testcontainers.kafka.ConfluentKafkaContainer
 import org.testcontainers.utility.DockerImageName
 
 /**
@@ -32,6 +33,24 @@ abstract class PaymentServiceTestBase {
             PostgreSQLContainer<Nothing>(DockerImageName.parse("postgres:16-alpine"))
                 .apply { start() }
 
+        /**
+         * Kafka in KRaft mode, one broker, no ZooKeeper -- as in docker-compose.yml.
+         *
+         * Pinned to Kafka 3.8 (cp-kafka 7.8) rather than the 3.9 that Compose runs, because
+         * Testcontainers cannot start a 3.9 broker: it formats the storage directory with placeholder
+         * listeners and only rewrites them once the container is up, and Kafka 3.9's `kafka-storage
+         * format` began validating that config, failing with "advertised.listeners cannot use the
+         * nonroutable meta-address 0.0.0.0". Nothing this service uses differs between the two.
+         *
+         * It lives in the shared base so every payment test runs in one Spring context against one
+         * broker, rather than paying for a second container and a second context.
+         */
+        @ServiceConnection
+        @JvmStatic
+        val kafka: ConfluentKafkaContainer =
+            ConfluentKafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.8.0"))
+                .apply { start() }
+
         @JvmStatic
         val accountService: WireMockServer = WireMockServer(
             WireMockConfiguration.options()
@@ -49,6 +68,9 @@ abstract class PaymentServiceTestBase {
             registry.add("account-service.base-url") { "http://localhost:${accountService.port()}" }
             registry.add("account-service.read-timeout") { "300ms" }
             registry.add("account-service.connect-timeout") { "300ms" }
+            // Relay fast, so tests wait tens of milliseconds for an event rather than a second.
+            registry.add("outbox.poll-interval") { "100ms" }
+            registry.add("outbox.topic-replicas") { "1" }
         }
     }
 

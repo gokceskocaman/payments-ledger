@@ -2,11 +2,13 @@ package dev.gokce.payments.payment.application
 
 import dev.gokce.payments.payment.domain.IdempotencyKeyReusedException
 import dev.gokce.payments.payment.domain.Payment
+import dev.gokce.payments.payment.domain.PaymentEventType
 import dev.gokce.payments.payment.domain.PaymentNotFoundException
 import dev.gokce.payments.payment.domain.RequestFingerprint
 import dev.gokce.payments.payment.infrastructure.PaymentRepository
 import dev.gokce.payments.payment.infrastructure.accounts.AccountServiceClient
 import dev.gokce.payments.payment.infrastructure.accounts.TransferOutcome
+import dev.gokce.payments.payment.infrastructure.outbox.OutboxWriter
 import org.slf4j.LoggerFactory
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
@@ -29,6 +31,7 @@ import java.util.UUID
 class PaymentService(
     private val payments: PaymentRepository,
     private val accountService: AccountServiceClient,
+    private val outbox: OutboxWriter,
     private val transactions: TransactionTemplate,
 ) {
 
@@ -85,6 +88,9 @@ class PaymentService(
                         currency = command.currency,
                     ),
                 )
+                // Same transaction as the INSERT: a payment that exists always has its
+                // PaymentCreated event, and an event never describes a payment that was rolled back.
+                outbox.record(created, PaymentEventType.PaymentCreated)
                 SubmittedPayment(created, replayed = false)
             },
         )
@@ -108,8 +114,18 @@ class PaymentService(
             if (payment.status.isTerminal) return@execute payment
 
             when (outcome) {
-                is TransferOutcome.Posted -> payment.complete()
-                is TransferOutcome.Refused -> payment.fail(outcome.reason)
+                is TransferOutcome.Posted -> {
+                    payment.complete()
+                    outbox.record(payment, PaymentEventType.PaymentCompleted)
+                }
+
+                is TransferOutcome.Refused -> {
+                    payment.fail(outcome.reason)
+                    outbox.record(payment, PaymentEventType.PaymentFailed)
+                }
+
+                // No event: nothing terminal has happened yet, and an event saying otherwise
+                // would be a claim this service cannot support.
                 is TransferOutcome.Indeterminate -> log.warn(
                     "Payment {} left PENDING: {}. The transfer may or may not have been posted; " +
                         "re-sending it with the same transferId is the only way to find out.",

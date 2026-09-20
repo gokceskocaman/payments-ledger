@@ -5,8 +5,8 @@ payment requests and is idempotent on an `Idempotency-Key`; `account-service` ow
 ledger where every movement writes exactly one DEBIT and one CREDIT row in a single transaction.
 Money is always `Long` minor units, balances can never go negative, concurrent writers are serialised
 with ordered row locks, and a payment whose outcome is unknown stays `PENDING` rather than lying in
-either direction. Each service owns its own Postgres; they talk over HTTP, with Kafka wired up for
-the events still to come.
+either direction. Each service owns its own Postgres; they talk over HTTP, and payment events reach
+Kafka through a transactional outbox rather than a dual write.
 
 ## Architecture
 
@@ -28,12 +28,16 @@ the events still to come.
                   v                                             v
        +--------------------+                        +--------------------+
        |  postgres-payment  |                        |  postgres-account  |
+       |  payments          |                        |  accounts          |
+       |  outbox_events     |                        |  ledger_entries    |
        |       :5434        |                        |       :5433        |
        +--------------------+                        +--------------------+
-
+                  |
+                  |  relay: claim (SKIP LOCKED) -> send -> mark sent
+                  v
        +--------------------+
-       |   Kafka (KRaft)    |  running, not yet used -- see Roadmap
-       |       :9092        |
+       |   Kafka (KRaft)    |  topic payments.events, key = paymentId
+       |       :9092        |  PaymentCreated / Completed / Failed
        +--------------------+
 ```
 
@@ -156,6 +160,16 @@ times out, the payment stays `PENDING` rather than being guessed as FAILED, and 
 either posts the movement or replays the one already posted. `FAILED` is reserved for a definitive
 refusal; a timeout is an absence of information, not a decision.
 
+**Events go through a transactional outbox, not a dual write.** A payment changes a Postgres row and
+should produce a Kafka message, and no transaction spans both. Writing the row then publishing loses
+the event on a crash; publishing then writing announces a payment that never existed. So the event is
+inserted into `outbox_events` in the *same transaction* as the state change -- one commit, nothing to
+get out of step -- and a scheduled relay claims rows with `FOR UPDATE SKIP LOCKED`, publishes them,
+then marks them sent. That order gives **at-least-once**: a crash between send and mark resends the
+event, never drops it. Consumers must therefore deduplicate, and every event carries an `eventId` in
+its payload and in an `event-id` header so they can. Messages are keyed by payment id, so one
+payment's events share a partition and `PaymentCreated` always precedes its terminal event.
+
 The full reasoning, including the options that were rejected, is in
 [docs/design-notes.md](docs/design-notes.md).
 
@@ -169,14 +183,17 @@ The full reasoning, including the options that were rejected, is in
   `POST /internal/transfers` with ordered pessimistic locking
 - payment-service: idempotent `POST /payments`, `PENDING -> COMPLETED | FAILED` state machine,
   RestClient with explicit timeouts, three-way outcome handling for the in-doubt case
+- Transactional outbox in payment-service: `PaymentCreated` / `PaymentCompleted` / `PaymentFailed`
+  written with the state change, relayed to Kafka by a scheduled poller, keyed by payment id
 - RFC 7807 errors and Bean Validation across both services
-- 38 tests: Testcontainers Postgres, WireMock for account-service, concurrency and timeout cases
+- 43 tests: Testcontainers Postgres and Kafka, WireMock for account-service, concurrency, timeout and
+  outbox cases
 
 **Next**
 
-- **Kafka outbox** — `PaymentCreated` / `PaymentCompleted` / `PaymentFailed` written to an outbox table
-  in the same transaction as the state change, relayed to Kafka by a poller, consumed idempotently by
-  event id. Publishing from the request thread is the dual-write bug the outbox exists to remove.
+- **A consumer, and outbox housekeeping** — nothing subscribes to `payments.events` yet, so the
+  idempotent-consumer half of the story is still theory. `outbox_events` also keeps every published
+  row and needs an archival job.
 - **Reconciliation job** — sweep `payments WHERE status = 'PENDING'` past a grace period and re-send
   the transfer. Today an in-doubt payment is only resolved when the caller retries; the partial index
   is already in the schema and the logic is the existing retry path.

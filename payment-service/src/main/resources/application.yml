@@ -26,6 +26,25 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      # Wait for every in-sync replica before calling a send successful. A payment event that the
+      # leader acknowledged and then lost with its disk is exactly the event we cannot afford to drop.
+      acks: all
+      properties:
+        # Producer-level retries would otherwise duplicate records on a flaky connection. This does
+        # not make the pipeline exactly-once -- the relay can still resend after a crash -- it just
+        # removes one avoidable source of duplicates.
+        enable.idempotence: true
+
+outbox:
+  topic: payments.events
+  poll-interval: 1s
+  batch-size: 100
+  topic-partitions: 3
+  topic-replicas: 1
+
 # The only thing this service talks to. Timeouts are explicit because the defaults are "forever":
 # see AccountServiceProperties for how these two numbers were chosen.
 account-service:

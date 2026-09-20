@@ -216,6 +216,98 @@ second transaction afterwards. Both halves matter:
   payment back entirely -- leaving no record that a transfer with that id might have been posted. The
   durable PENDING row *is* the recovery mechanism.
 
+## The outbox, and the dual-write problem
+
+A payment changes two things: a row in Postgres and a message on Kafka. There is no transaction that
+spans both, and that is not an implementation gap -- it is the nature of two independent systems.
+Publishing from the request thread means picking which one to do first, and both orders are broken:
+
+```
+  write DB, then publish                     publish, then write DB
+  ----------------------                     ----------------------
+  COMMIT payment = COMPLETED  ok             send PaymentCompleted   ok
+  send PaymentCompleted       CRASH          COMMIT payment          CRASH / rollback
+  -> money moved, nobody told               -> the world was told about a payment
+     downstream; the ledger and                 that does not exist; refunds and
+     the read model drift apart                 ledgers are built on a lie
+```
+
+Retrying inside the request does not fix it, it narrows the window. Neither does a `try/catch`: the
+crash you care about is the one that takes the process out between the two statements. And "publish
+in an `@TransactionalEventListener(AFTER_COMMIT)`" has exactly the same hole -- after commit, the
+publish can still fail and nobody will ever retry it.
+
+**The outbox removes the second system from the critical path.** The event is written to
+`outbox_events` in the *same transaction* as the state change:
+
+```sql
+BEGIN;
+  UPDATE payments SET status = 'COMPLETED' WHERE id = ...;
+  INSERT INTO outbox_events (...) VALUES (...);
+COMMIT;                     -- one commit, one atomic fact
+```
+
+Now there is only one write, so there is nothing to get out of step. Either the payment is completed
+and its event is queued, or neither happened. A separate relay moves queued rows to Kafka afterwards,
+and it can crash, retry, or run late without ever threatening that invariant -- the worst it can do
+is deliver an event twice or deliver it a second later than you would like.
+
+### At-least-once, and why not exactly-once
+
+The relay does three things in this order: **claim the row, publish, mark it published.**
+
+```
+claim (FOR UPDATE SKIP LOCKED)  ->  send to Kafka, wait for ack  ->  UPDATE published_at  ->  COMMIT
+                                            ^                                    ^
+                                     crash here: the row is                crash here: the row is
+                                     untouched, so the next tick           still unpublished, so
+                                     sends it -- no loss                   the next tick sends it
+                                                                           AGAIN -- a duplicate
+```
+
+That is **at-least-once**: an event is never lost, and may be delivered more than once. The
+alternative ordering -- mark published, then send -- gives at-most-once, where a crash loses the event
+silently. For a payments system that is the worse trade: a duplicate is something a consumer can
+detect and discard, while a missing `PaymentCompleted` is invisible until someone notices the money.
+
+Exactly-once across Postgres and Kafka is not available here. It would need either a distributed
+transaction over both (XA -- slow, and a coordinator whose own failure modes are worse than the
+problem), or Kafka transactions, which can only make writes *within Kafka* atomic and cannot include
+a Postgres commit. So the honest design is at-least-once plus deduplication at the edge.
+
+**That obligation is pushed to consumers, and the events carry what they need to meet it.** Each
+event has an `eventId` -- the outbox row id -- in both the payload and an `event-id` Kafka header. A
+consumer records the ids it has processed and drops repeats. This is the same shape as the
+`transferId` in account-service and the `Idempotency-Key` at the edge: at every boundary, the
+identifier belongs to the *thing* rather than to the *attempt*, so a repeat is recognisable.
+
+### Ordering, and why the key is the payment id
+
+Kafka orders records within a partition, not within a topic, and the key chooses the partition. Every
+event for one payment is keyed by that payment's id, so `PaymentCreated` always reaches a consumer
+before that payment's `PaymentCompleted`. Events for *different* payments have no ordering guarantee
+relative to each other, which is fine -- nothing about payment A depends on payment B.
+
+The relay reinforces this: it processes a claimed batch in `occurred_at` order and **stops at the
+first failure** rather than skipping past it, so a failed send cannot let a later event for the same
+payment overtake an earlier one.
+
+### Running more than one instance
+
+The claim query is `SELECT ... FOR UPDATE SKIP LOCKED`. Two relays polling at once each lock a
+disjoint set of rows and step straight over what the other is holding, instead of queueing behind it
+or -- worse -- both publishing the same row. The row lock is held for the length of the send, which is
+why the batch is bounded and the send has its own timeout.
+
+### What this costs
+
+- **Latency.** An event is visible on Kafka up to one poll interval after the commit, not instantly.
+- **A table that grows.** `outbox_events` keeps every published row; it needs an archival job, which
+  is not written yet. The partial index at least keeps the relay's query proportional to the backlog
+  rather than to history.
+- **Duplicates are real, not theoretical.** Any consumer that is not idempotent will eventually be
+  wrong.
+
 ## Design decisions
 
 - **Multi-module Gradle build with a thin root project.** The root `build.gradle.kts` owns the

@@ -14,11 +14,15 @@ dependencies {
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
 
+    // Producer only for now: the relay publishes, nothing in this service consumes yet.
+    implementation("org.springframework.kafka:spring-kafka")
+
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:postgresql")
+    testImplementation("org.testcontainers:kafka")
 
     // A real HTTP server standing in for account-service. Needed rather than a mocked client
     // because the interesting case -- a read timeout -- only exists at the socket level.
