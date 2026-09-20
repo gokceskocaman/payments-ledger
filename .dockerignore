@@ -1,0 +1,10 @@
+# The build context is the repository root, because the Gradle build is multi-module. Everything the
+# image does not need is excluded here -- otherwise every `docker build` ships hundreds of megabytes
+# of git history and stale build output to the daemon before it starts.
+.git
+.gradle
+**/build
+**/.DS_Store
+docs
+scripts
+*.md

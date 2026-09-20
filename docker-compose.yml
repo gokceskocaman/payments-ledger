@@ -1,5 +1,13 @@
-# Local infrastructure only. The two Spring Boot services run on the host (./gradlew bootRun
-# or from the IDE), so they are easy to debug and restart while developing.
+# Two ways to run this:
+#
+#   docker compose up -d                          infrastructure only -- the default. Run the services
+#                                                 on the host with ./gradlew bootRun, which keeps the
+#                                                 edit/restart/debug loop fast.
+#   docker compose --profile apps up -d --build   the whole stack in containers, as a deployment
+#                                                 rehearsal: the services then reach Postgres and
+#                                                 Kafka by service name rather than via localhost.
+#
+# The services are behind a profile so the first command stays fast and does not build images.
 name: payments-ledger
 
 services:
@@ -74,6 +82,60 @@ services:
       timeout: 10s
       retries: 10
       start_period: 20s
+
+  # ---------------------------------------------------------------------------------------------------
+  # The services themselves, only with --profile apps.
+  # ---------------------------------------------------------------------------------------------------
+
+  account-service:
+    profiles: ["apps"]
+    build:
+      # The repository root, because the Gradle build is multi-module and the Dockerfile needs it all.
+      context: .
+      dockerfile: account-service/Dockerfile
+    container_name: pl-account-service
+    depends_on:
+      postgres-account:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      # Inside the compose network the database is reachable by service name on its own port, not on
+      # the host port mapping.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-account:5432/account
+      SPRING_DATASOURCE_USERNAME: account
+      SPRING_DATASOURCE_PASSWORD: account
+      # The INTERNAL listener, which is why the broker advertises two of them.
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      JWT_HMAC_SECRET: dev-only-hs256-secret-not-for-production-0123456789
+      JWT_ISSUER: payments-ledger-dev
+    ports:
+      - "8081:8081"
+
+  payment-service:
+    profiles: ["apps"]
+    build:
+      context: .
+      dockerfile: payment-service/Dockerfile
+    container_name: pl-payment-service
+    depends_on:
+      postgres-payment:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      account-service:
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-payment:5432/payment
+      SPRING_DATASOURCE_USERNAME: payment
+      SPRING_DATASOURCE_PASSWORD: payment
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      ACCOUNT_SERVICE_BASE_URL: http://account-service:8081
+      # Must match account-service: the service token payment-service mints has to verify there.
+      JWT_HMAC_SECRET: dev-only-hs256-secret-not-for-production-0123456789
+      JWT_ISSUER: payments-ledger-dev
+    ports:
+      - "8082:8082"
 
 volumes:
   postgres-account-data:

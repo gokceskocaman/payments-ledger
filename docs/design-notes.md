@@ -452,6 +452,62 @@ It buys the thing a portfolio project needs most, which is that `docker compose 
 The important part is that none of these change the application's code: the resource-server
 configuration is nine lines of filter chain, and the swap is a property.
 
+## Packaging and CI
+
+### Why the images are layered
+
+A Spring Boot fat jar is one file of which roughly 95% is dependencies that change a few times a
+year, and 5% is application code that changes hourly. Copying the whole jar into an image makes every
+code change a new ~70 MB layer. So the build extracts it first:
+
+```
+java -Djarmode=tools -jar app.jar extract --layers --launcher --destination extracted
+```
+
+which produces four directories -- `dependencies`, `spring-boot-loader`, `snapshot-dependencies`,
+`application` -- copied into the image in that order, least- to most-frequently-changed. A code-only
+change then rebuilds one small layer. The entry point is `JarLauncher` rather than `java -jar`,
+because the jar no longer exists as a jar.
+
+Other choices in the same file:
+
+- **A JDK builds, a JRE runs.** The final image has no compiler, no Gradle, no source tree. Smaller,
+  and less to exploit.
+- **Non-root.** A container escape should not begin with privileges the process never needed.
+- **`-XX:MaxRAMPercentage=75.0`, not `-Xmx`.** The JVM sizes its heap from the container's memory
+  limit rather than the host's, which is the difference between a pod that respects its request and
+  one that gets OOM-killed.
+- **Build scripts are copied before sources.** Dependency resolution lands in a layer that survives
+  every source-only rebuild.
+- **The image build does not run tests.** They need a Docker daemon, and Docker-in-Docker to build an
+  image is a poor trade. CI runs the whole suite first and only then builds images.
+
+### What CI actually protects against
+
+Everything in this repository has, until now, been verified on exactly one machine -- with a
+particular Docker Desktop, a particular JDK, and a warm Gradle cache. Two of the hardest problems in
+this project were of precisely that shape:
+
+- Testcontainers could not start Kafka 3.9, and only 3.9, because of how that version validates
+  listeners during storage formatting;
+- a read timeout surfaced as `CancellationException` rather than the exception the code caught, and
+  the test passed anyway the first time by luck.
+
+Neither would have been caught by reading the code. Both are the kind of thing that a clean machine
+finds. So CI does two jobs:
+
+1. **`./gradlew build` on a clean ubuntu-latest runner.** Real Postgres, real Kafka, real WireMock,
+   cold caches, a different Docker version. Test reports are uploaded even when the build fails,
+   because a container-backed failure on a machine you cannot attach to is otherwise a mystery.
+2. **Both images built from a clean context.** A local `docker build` with a warm cache will happily
+   hide a missing `COPY`; a cold runner will not. The images are built and thrown away -- pushing needs
+   a registry and credentials, which belong with a deployment step rather than a test.
+
+The runner's Docker socket is at `/var/run/docker.sock`, which is exactly what the `api.version` and
+`TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` settings in `build.gradle.kts` already assume -- so CI needs no
+Testcontainers configuration of its own. The local `~/.testcontainers.properties` exists only because
+Docker Desktop on macOS does not expose that socket.
+
 ## Design decisions
 
 - **Multi-module Gradle build with a thin root project.** The root `build.gradle.kts` owns the

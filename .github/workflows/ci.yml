@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: this workflow only reads the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch supersedes the previous run; no point paying for both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # Caches the Gradle distribution the wrapper downloads plus the dependency cache, and writes
+      # a build summary to the job page.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Testcontainers needs a Docker daemon. The ubuntu-latest runner has one at
+      # /var/run/docker.sock, which is exactly what the api.version and socket-override settings in
+      # build.gradle.kts already assume -- so nothing extra is configured here.
+      - name: Show Docker version
+        run: docker version --format 'server {{.Server.Version}}, API {{.Server.APIVersion}}'
+
+      - name: Build
+        run: ./gradlew build --no-daemon
+
+      # Reports are the only way to see why a container-backed test failed on a machine you cannot
+      # attach to, so they are kept even when -- especially when -- the build fails.
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            */build/reports/tests/
+            */build/test-results/
+          retention-days: 7
+          if-no-files-found: warn
+
+  images:
+    name: Build container images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only worth building images for code that passes its tests.
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built but not pushed: this proves the Dockerfiles work on a clean machine, which is the
+      # failure mode a local `docker build` with a warm cache will never catch. Pushing needs a
+      # registry and credentials, and belongs with a deployment step.
+      - name: Build account-service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: account-service/Dockerfile
+          push: false
+          tags: payments-ledger/account-service:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build payment-service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: payment-service/Dockerfile
+          push: false
+          tags: payments-ledger/payment-service:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

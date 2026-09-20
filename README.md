@@ -1,5 +1,7 @@
 # payments-ledger
 
+[![CI](https://github.com/gokceskocaman/payments-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/gokceskocaman/payments-ledger/actions/workflows/ci.yml)
+
 Two Kotlin / Spring Boot services that move money between accounts safely. `payment-service` accepts
 payment requests and is idempotent on an `Idempotency-Key`; `account-service` owns a double-entry
 ledger where every movement writes exactly one DEBIT and one CREDIT row in a single transaction.
@@ -74,6 +76,13 @@ Then run each service in its own shell:
 
 ```bash
 ./gradlew :payment-service:bootRun
+```
+
+Or run the whole stack in containers instead — a deployment rehearsal, where the services reach
+Postgres and Kafka by service name rather than through the host port mappings:
+
+```bash
+docker compose --profile apps up -d --build
 ```
 
 ```bash
@@ -212,6 +221,13 @@ event, never drops it. Consumers must therefore deduplicate, and every event car
 its payload and in an `event-id` header so they can. Messages are keyed by payment id, so one
 payment's events share a partition and `PaymentCreated` always precedes its terminal event.
 
+**Images are multi-stage and layered.** A JDK stage builds; a JRE stage runs, with no compiler,
+build tool or source in the final image, and as a non-root user. The fat jar is split with Boot's
+`jarmode=tools` extraction so a code change reuses the dependency layer instead of shipping ~60 MB of
+unchanged libraries again. `-XX:MaxRAMPercentage` rather than `-Xmx`, so the heap is sized from the
+container's limit instead of the host's. Tests deliberately do **not** run inside the image build —
+they need Docker, and Docker-in-Docker is a bad trade when CI already runs the full suite first.
+
 The full reasoning, including the options that were rejected, is in
 [docs/design-notes.md](docs/design-notes.md).
 
@@ -235,6 +251,9 @@ The full reasoning, including the options that were rejected, is in
 - RFC 7807 errors and Bean Validation across both services
 - 65 tests: Testcontainers Postgres and Kafka, WireMock for account-service, concurrency, timeout,
   outbox, duplicate-delivery and security cases
+- Multi-stage, layered, non-root container images for both services, runnable via a Compose profile
+- GitHub Actions CI on every push and pull request: the full suite against real containers, then both
+  images built on a clean machine
 
 **Next**
 
@@ -246,6 +265,6 @@ The full reasoning, including the options that were rejected, is in
   is already in the schema and the logic is the existing retry path.
 - **A real identity provider** — swap the symmetric dev secret for `jwk-set-uri`, and
   `ServiceTokenProvider` for OAuth2 client credentials. Add audience validation.
-- **CI** — GitHub Actions running `./gradlew build` with Testcontainers, plus ktlint or detekt.
+- **Static analysis** — ktlint or detekt in the CI pipeline.
 - **AWS** — Dockerfiles, ECS Fargate or EKS, RDS for Postgres, MSK for Kafka, secrets out of
   `application.yml` and into Parameter Store.
