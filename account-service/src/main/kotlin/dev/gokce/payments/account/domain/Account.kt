@@ -9,6 +9,7 @@ import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.Table
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 
 /**
  * An account and its cached balance.
@@ -40,8 +41,13 @@ class Account(
     var balance: Long = 0
         private set
 
+    /**
+     * Truncated to microseconds because that is all `timestamptz` keeps. Without it the value held in
+     * memory differs from the value every later read returns -- invisible on macOS, where the clock is
+     * already microsecond-resolution, and wrong on Linux, where it is not.
+     */
     @Column(name = "created_at", nullable = false, updatable = false)
-    val createdAt: Instant = Instant.now()
+    val createdAt: Instant = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
     fun credit(amount: Long) {
         requirePositive(amount)

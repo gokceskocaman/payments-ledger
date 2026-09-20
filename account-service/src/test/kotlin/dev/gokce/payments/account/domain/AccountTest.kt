@@ -3,6 +3,7 @@ package dev.gokce.payments.account.domain
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
+import java.time.temporal.ChronoUnit
 
 class AccountTest {
 
@@ -58,5 +59,23 @@ class AccountTest {
     fun `amounts must be positive`() {
         assertThatThrownBy { customer().credit(0) }.isInstanceOf(IllegalArgumentException::class.java)
         assertThatThrownBy { customer().debit(-1) }.isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun `timestamps carry no precision the database cannot store`() {
+        // Postgres timestamptz keeps microseconds. A nanosecond-resolution clock -- which Linux has and
+        // macOS does not -- would otherwise make the value returned by a write differ from the value
+        // returned by every later read of the same row.
+        val account = customer()
+        assertThat(account.createdAt).isEqualTo(account.createdAt.truncatedTo(ChronoUnit.MICROS))
+
+        val entry = LedgerEntry(
+            accountId = 1,
+            transferId = java.util.UUID.randomUUID(),
+            direction = Direction.CREDIT,
+            amount = 100,
+            currency = "EUR",
+        )
+        assertThat(entry.createdAt).isEqualTo(entry.createdAt.truncatedTo(ChronoUnit.MICROS))
     }
 }

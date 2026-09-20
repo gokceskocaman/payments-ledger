@@ -9,6 +9,7 @@ import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.Table
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 /**
@@ -53,11 +54,16 @@ class Payment(
     var failureReason: String? = null
         private set
 
+    /**
+     * Truncated to microseconds because that is all `timestamptz` keeps. Without it the value held in
+     * memory differs from the value every later read returns -- invisible on macOS, where the clock is
+     * already microsecond-resolution, and wrong on Linux, where it is not.
+     */
     @Column(name = "created_at", nullable = false, updatable = false)
-    val createdAt: Instant = Instant.now()
+    val createdAt: Instant = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
     @Column(name = "updated_at", nullable = false)
-    var updatedAt: Instant = Instant.now()
+    var updatedAt: Instant = Instant.now().truncatedTo(ChronoUnit.MICROS)
         private set
 
     /** Only after account-service has confirmed the movement. */
@@ -78,7 +84,7 @@ class Payment(
     private fun transitionTo(target: PaymentStatus) {
         if (status != PaymentStatus.PENDING) throw IllegalPaymentTransitionException(status, target)
         status = target
-        updatedAt = Instant.now()
+        updatedAt = Instant.now().truncatedTo(ChronoUnit.MICROS)
     }
 
     fun matches(requestHash: String): Boolean = this.requestHash == requestHash

@@ -6,6 +6,7 @@ import dev.gokce.payments.payment.domain.Payment
 import dev.gokce.payments.payment.domain.PaymentEventType
 import org.springframework.stereotype.Component
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 /**
@@ -31,7 +32,8 @@ class OutboxWriter(
                 // without depending on broker metadata surviving every hop.
                 "eventId" to eventId,
                 "eventType" to eventType,
-                "occurredAt" to Instant.now(),
+                // Same precision as the column it sits beside, so the payload and the row agree.
+                "occurredAt" to Instant.now().truncatedTo(ChronoUnit.MICROS),
                 "paymentId" to paymentId,
                 "fromAccountId" to payment.fromAccountId,
                 "toAccountId" to payment.toAccountId,

@@ -11,6 +11,7 @@ import jakarta.persistence.Table
 import jakarta.persistence.Transient
 import org.springframework.data.domain.Persistable
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 /**
@@ -43,7 +44,7 @@ class OutboxEvent(
 ) : Persistable<UUID> {
 
     @Column(name = "occurred_at", nullable = false, updatable = false)
-    val occurredAt: Instant = Instant.now()
+    val occurredAt: Instant = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
     @Column(name = "published_at")
     var publishedAt: Instant? = null
@@ -72,7 +73,7 @@ class OutboxEvent(
 
     /** Called only after the broker has acknowledged the record. */
     fun markPublished() {
-        publishedAt = Instant.now()
+        publishedAt = Instant.now().truncatedTo(ChronoUnit.MICROS)
         lastError = null
     }
 

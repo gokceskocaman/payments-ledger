@@ -9,6 +9,7 @@ import jakarta.persistence.GenerationType
 import jakarta.persistence.Id
 import jakarta.persistence.Table
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 /**
@@ -47,6 +48,7 @@ class LedgerEntry(
     var id: Long? = null
         private set
 
+    /** Microseconds: the precision `timestamptz` keeps, so the API never returns one it cannot store. */
     @Column(name = "created_at", nullable = false, updatable = false)
-    val createdAt: Instant = Instant.now()
+    val createdAt: Instant = Instant.now().truncatedTo(ChronoUnit.MICROS)
 }

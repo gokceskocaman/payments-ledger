@@ -5,6 +5,7 @@ import jakarta.persistence.Entity
 import jakarta.persistence.Id
 import jakarta.persistence.Table
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 
 /**
@@ -38,5 +39,5 @@ class ProcessedEvent(
     val payload: String,
 
     @Column(name = "processed_at", nullable = false)
-    val processedAt: Instant = Instant.now(),
+    val processedAt: Instant = Instant.now().truncatedTo(ChronoUnit.MICROS),
 )
