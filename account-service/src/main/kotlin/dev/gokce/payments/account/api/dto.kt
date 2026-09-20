@@ -1,5 +1,6 @@
 package dev.gokce.payments.account.api
 
+import dev.gokce.payments.account.application.PostedTransfer
 import dev.gokce.payments.account.domain.Account
 import dev.gokce.payments.account.domain.Direction
 import dev.gokce.payments.account.domain.LedgerEntry
@@ -35,6 +36,46 @@ data class DepositRequest(
     @field:Pattern(regexp = CURRENCY_PATTERN, message = CURRENCY_MESSAGE)
     val currency: String,
 )
+
+data class TransferRequest(
+    /** Supplied by the caller, so a retry after a timeout is recognised rather than posted twice. */
+    val transferId: UUID,
+
+    @field:Positive
+    val fromAccountId: Long,
+
+    @field:Positive
+    val toAccountId: Long,
+
+    @field:Positive
+    val amount: Long,
+
+    @field:Pattern(regexp = CURRENCY_PATTERN, message = CURRENCY_MESSAGE)
+    val currency: String,
+)
+
+data class TransferResponse(
+    val transferId: UUID,
+    val fromAccountId: Long,
+    val toAccountId: Long,
+    val amount: Long,
+    val currency: String,
+    val postedAt: Instant,
+    /** False when this call posted the movement, true when it replayed an earlier one. */
+    val replayed: Boolean,
+) {
+    companion object {
+        fun from(transfer: PostedTransfer) = TransferResponse(
+            transferId = transfer.transferId,
+            fromAccountId = transfer.fromAccountId,
+            toAccountId = transfer.toAccountId,
+            amount = transfer.amount,
+            currency = transfer.currency,
+            postedAt = transfer.postedAt,
+            replayed = transfer.replayed,
+        )
+    }
+}
 
 data class AccountResponse(
     val id: Long,

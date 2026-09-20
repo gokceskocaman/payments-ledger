@@ -9,39 +9,23 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.data.domain.Pageable
 import org.springframework.http.HttpStatus
 import org.springframework.jdbc.core.JdbcTemplate
-import org.testcontainers.containers.PostgreSQLContainer
-import org.testcontainers.junit.jupiter.Container
-import org.testcontainers.junit.jupiter.Testcontainers
-import org.testcontainers.utility.DockerImageName
 import java.util.UUID
 
 /**
- * Runs against a real Postgres started by Testcontainers, with Flyway applying the same migration
- * that production runs. The schema leans on partial unique indexes, CHECK constraints and a plpgsql
- * trigger, so testing against H2 would test a different database than the one we ship.
+ * Accounts, deposits and the ledger, exercised over real HTTP against a real Postgres. The schema
+ * leans on partial unique indexes, CHECK constraints and a plpgsql trigger, so testing against H2
+ * would test a different database than the one we ship.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Testcontainers
 class AccountLedgerIntegrationTest @Autowired constructor(
     private val rest: TestRestTemplate,
     private val accounts: AccountRepository,
     private val ledgerEntries: LedgerEntryRepository,
     private val jdbc: JdbcTemplate,
-) {
-
-    companion object {
-        /** @ServiceConnection points spring.datasource.* at this container; no manual wiring. */
-        @Container
-        @ServiceConnection
-        @JvmStatic
-        val postgres = PostgreSQLContainer<Nothing>(DockerImageName.parse("postgres:16-alpine"))
-    }
+) : PostgresTestBase() {
 
     @Test
     fun `creating an account returns it with a zero balance`() {

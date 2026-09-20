@@ -4,8 +4,10 @@ import com.fasterxml.jackson.databind.exc.MismatchedInputException
 import dev.gokce.payments.account.domain.AccountNotFoundException
 import dev.gokce.payments.account.domain.CurrencyMismatchException
 import dev.gokce.payments.account.domain.CurrencyNotFundableException
-import dev.gokce.payments.account.domain.DepositNotAllowedException
 import dev.gokce.payments.account.domain.InsufficientFundsException
+import dev.gokce.payments.account.domain.SameAccountTransferException
+import dev.gokce.payments.account.domain.SystemAccountNotAllowedException
+import dev.gokce.payments.account.domain.TransferConflictException
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.HttpStatusCode
@@ -63,12 +65,30 @@ class ApiExceptionHandler : ResponseEntityExceptionHandler() {
         detail = e.message,
     )
 
-    @ExceptionHandler(DepositNotAllowedException::class)
-    fun onDepositNotAllowed(e: DepositNotAllowedException) = problem(
+    @ExceptionHandler(SystemAccountNotAllowedException::class)
+    fun onSystemAccountNotAllowed(e: SystemAccountNotAllowedException) = problem(
         status = HttpStatus.UNPROCESSABLE_ENTITY,
-        type = "deposit-not-allowed",
-        title = "Deposit not allowed",
+        type = "system-account-not-allowed",
+        title = "System account not allowed",
         detail = e.message,
+    )
+
+    @ExceptionHandler(SameAccountTransferException::class)
+    fun onSameAccountTransfer(e: SameAccountTransferException) = problem(
+        status = HttpStatus.UNPROCESSABLE_ENTITY,
+        type = "same-account-transfer",
+        title = "Same account transfer",
+        detail = e.message,
+    )
+
+    /** Same transferId, different details -- the idempotency key has been reused. */
+    @ExceptionHandler(TransferConflictException::class)
+    fun onTransferConflict(e: TransferConflictException) = problem(
+        status = HttpStatus.UNPROCESSABLE_ENTITY,
+        type = "transfer-conflict",
+        title = "Transfer conflict",
+        detail = e.message,
+        properties = mapOf("transferId" to e.transferId.toString()),
     )
 
     /** Field-level validation failures, listed so a client can fix them all in one round trip. */

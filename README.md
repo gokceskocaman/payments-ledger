@@ -140,6 +140,72 @@ The cache exists because reading a balance must not cost an aggregate over an ac
 history, and because `SELECT ... FOR UPDATE` on one `accounts` row is what serialises concurrent
 writers. So: entries decide, `balance` remembers.
 
+### Locking: pessimistic, and why the order matters
+
+`POST /internal/transfers` moves money between two accounts, which means reading two balances,
+checking one of them, and writing four rows -- and doing all of it as if nothing else were running.
+Two strategies were available.
+
+**Optimistic locking** (`@Version` on the account row, retry on conflict) lets writers proceed without
+blocking and detects a collision at commit time: if the version changed underneath you, your
+transaction is rejected and you try again. It is the right default for data that is read far more than
+it is written, and for conflicts that are genuinely rare.
+
+**Pessimistic locking** (`SELECT ... FOR UPDATE`) takes the row lock up front. Other writers of the
+same row wait; readers are unaffected. This project uses it, for three reasons:
+
+1. **The critical section is read-check-write, and it has to be atomic.** "Is the balance at least
+   1000? Then subtract 1000." Optimistic locking does not prevent two transactions from both reading
+   5000 and both deciding they can afford it -- it only ensures one of them fails at commit. That is
+   fine when the answer is "retry", and not fine when the retry has to re-run a business decision that
+   may now have a different outcome.
+2. **Retry is the wrong failure mode for a payment.** Under contention, optimistic locking converts
+   contention into *work thrown away*: with n writers on a hot account, n-1 transactions do their
+   reads, their checks and their inserts, then discard all of it. Latency becomes a function of how
+   unlucky you are, and the tail gets ugly exactly when the system is busiest. A row lock converts
+   contention into *queueing* instead: everyone waits their turn once, and the work is done once.
+3. **A blocked writer is easier to reason about than a rolled-back one.** With the lock held, the
+   balance we read cannot change before we write it, so the invariant "a customer balance never goes
+   negative" is enforced in one place instead of being re-derived on every retry path.
+
+The cost is real and worth stating: writers to one account are serialised, so a single very hot
+account becomes a throughput ceiling, and a transaction that holds a lock too long blocks everyone
+behind it. That is an acceptable trade for a ledger, where correctness is not negotiable and the
+per-transaction work is a handful of small writes. It also means transactions must stay short, which
+is one more reason `open-in-view` is off.
+
+**Why the locks are taken in ascending id order.** A deadlock needs a cycle: two transactions each
+holding something the other wants. Transfer 7 -> 12 and transfer 12 -> 7 arriving at the same moment
+is exactly that shape:
+
+```
+           unordered locking                      ordered locking (lowest id first)
+  T1: lock 7  ........ wait for 12  \         T1: lock 7 ....... lock 12 -> commit
+  T2: lock 12 ........ wait for 7   /  cycle  T2: wait for 7 ................ lock 7, lock 12
+           -> Postgres aborts one                      -> no cycle, T2 simply queues
+```
+
+If every transaction takes its locks in the same global order, a cycle is impossible: a transaction
+can only ever wait on a *higher* id than the ones it already holds, so the wait-for graph is acyclic
+by construction. Ordering does not reduce contention -- T2 still waits -- it converts a deadlock
+(one side aborted, work lost) into a queue (both sides succeed, one goes second).
+
+Two implementation details this depends on:
+
+- **One `SELECT ... FOR UPDATE` per row, not one statement for both.**
+  `where id in (7, 12) order by id for update` looks equivalent but guarantees nothing: Postgres is
+  free to lock rows as the plan produces them, which may be before the sort. The only way to control
+  lock order is to issue the locks in that order.
+- **No lock timeout.** Contention here is expected and benign, so waiting is the desired behaviour;
+  a `lock_timeout` would turn a queue back into failures for no gain. The
+  [50-concurrent-transfers test](account-service/src/test/kotlin/dev/gokce/payments/account/InternalTransferIntegrationTest.kt)
+  asserts exactly that -- no request fails for any reason other than insufficient funds.
+
+Both claims are tested rather than asserted in prose: 50 simultaneous transfers out of one account
+funded for 20 of them end with 20 successes, 30 refusals and a balance of exactly zero, and 50
+transfers running in both directions between the same pair of accounts all succeed with money
+conserved.
+
 ### Funding, and where money comes from
 
 Double entry means every credit needs a counterparty, so a deposit cannot simply invent money.
@@ -206,3 +272,24 @@ one system account per currency, found by `(account_type, currency)` rather than
 - **The Docker API version is pinned for tests.** Testcontainers' bundled docker-java negotiates API
   1.32, which Docker Engine 29 rejects outright. The test tasks ask for 1.40 -- the oldest version
   modern engines accept, supported since Docker 19.03 -- so the suite runs on old and new daemons alike.
+- **`transferId` is the caller's idempotency key, and a replay returns the original answer.**
+  `POST /internal/transfers` answers 200 with the movement as the ledger holds it, including the
+  timestamp it was *first* posted at, so a retry after a network timeout is indistinguishable from the
+  call it is retrying -- which is the only thing a caller that timed out can safely do. A `replayed`
+  flag is there for callers that want to know. The same key with *different* details is a 422 rather
+  than a silent success, because returning the original movement would quietly discard what the caller
+  actually asked for.
+- **No `transfers` table.** A movement *is* its pair of ledger entries, grouped by `transfer_id`. A
+  separate table would be a second copy of the same fact, needing its own consistency guarantee
+  against the entries; the unique constraint on the entries already provides idempotency, so the table
+  would add risk and no information.
+- **Transfers are between customer accounts only.** A transfer out of the SYSTEM account would be a
+  deposit wearing a disguise, and it would quietly escape the never-go-negative rule that this
+  endpoint's whole contract rests on.
+- **Balances move before the entries are written.** With IDENTITY primary keys, saving an entry
+  inserts immediately, so checking the overdraft first means a refused transfer never writes a row it
+  has to roll back.
+- **Integration tests share one container and one context.** The container is a started singleton in
+  `PostgresTestBase` rather than a JUnit `@Container`: the `@Testcontainers` extension stops a static
+  container once its declaring class finishes, which leaves every later test class talking to a closed
+  port.
