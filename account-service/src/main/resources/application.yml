@@ -26,6 +26,13 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
+  data:
+    web:
+      pageable:
+        default-page-size: 20
+        # Without a cap, ?size=1000000 is a denial-of-service request against the ledger.
+        max-page-size: 100
+
 management:
   endpoints:
     web:

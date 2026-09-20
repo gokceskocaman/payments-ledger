@@ -40,6 +40,16 @@ subprojects {
 
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
+        // Testcontainers ships docker-java, which still negotiates Docker API 1.32. Docker Engine 29
+        // rejects anything below 1.40 ("client version 1.32 is too old"), so pin the version the
+        // client asks for. 1.40 has been supported since Docker 19.03, so this works on old and new
+        // daemons alike -- including whatever version CI happens to run.
+        systemProperty("api.version", "1.40")
+        // Testcontainers' cleanup container (Ryuk) bind-mounts the Docker socket. It mounts the
+        // *host* path it connected through, which on Docker Desktop is a socket inside
+        // ~/Library/Containers that the VM cannot mount. Inside a container the socket is always at
+        // /var/run/docker.sock -- on Docker Desktop and on a Linux CI runner alike.
+        environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
     }
 
     dependencies {
