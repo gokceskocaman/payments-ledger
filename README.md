@@ -214,6 +214,77 @@ transaction. The system account's balance is therefore negative by design -- it 
 money has entered the ledger from outside -- which is why the non-negative CHECK exempts it. There is
 one system account per currency, found by `(account_type, currency)` rather than a hardcoded id.
 
+## The in-doubt payment
+
+The hardest question this system has to answer is not "did the payment work?" but **"what do I do
+when I do not know whether it worked?"**
+
+`payment-service` calls `account-service` over HTTP. If that call times out, three things could have
+happened, and from the caller's side they are indistinguishable:
+
+1. the request never arrived -- no money moved;
+2. the request arrived, was refused, and the answer was lost -- no money moved;
+3. **the request arrived, the money moved, and the answer was lost.**
+
+Marking the payment FAILED is the tempting move and the wrong one: in case 3 the customer has been
+told their payment failed while their money is gone. Marking it COMPLETED is worse in cases 1 and 2.
+Either way the record disagrees with reality, silently, forever.
+
+So the outcome is modelled with three values, not two:
+
+| Signal from account-service | Outcome | Payment status | HTTP |
+|---|---|---|---|
+| 2xx | `Posted` | COMPLETED | 201 |
+| 400 / 404 / 422 with a problem document | `Refused` | FAILED | 201 |
+| read timeout, connection reset, 5xx | `Indeterminate` | **stays PENDING** | 202 |
+
+FAILED is reserved for a *definitive* refusal: account-service looked at the request, declined it,
+and wrote nothing. A timeout is not a refusal, it is an absence of information, and PENDING is the
+honest name for that.
+
+### Why PENDING is recoverable rather than stuck
+
+Because **the payment's own id is the `transferId`** sent to account-service. The identifier belongs
+to the payment, not to the attempt, so asking again is not asking for a second transfer -- it is
+asking about the same one:
+
+```
+POST /payments  (Idempotency-Key: k)  -> payment 9f2c...  PENDING
+    POST /internal/transfers {transferId: 9f2c...}  -> timeout, outcome unknown
+
+POST /payments  (Idempotency-Key: k)  -> same payment 9f2c...
+    POST /internal/transfers {transferId: 9f2c...}  -> 200 {replayed: true}
+                                          -> payment 9f2c...  COMPLETED
+```
+
+If the money never moved, the retry moves it. If it did move, account-service recognises the
+`transferId` and replays the original movement instead of making a second one. Either way the payment
+reaches a correct terminal state, and the ledger holds exactly one movement. That is the entire
+payoff of making idempotency a database constraint two services apart: the ambiguity is resolved by
+*asking again*, which is the only thing a caller in doubt can safely do.
+
+Two consequences worth stating plainly:
+
+- **A retry of a PENDING payment re-attempts the transfer**; a retry of a COMPLETED or FAILED payment
+  returns the stored outcome without calling anyone. Terminal means terminal.
+- **Nothing here resolves a PENDING payment on its own yet.** Today it is resolved by the caller
+  retrying. A reconciliation job that walks
+  `payments WHERE status = 'PENDING' AND created_at < now() - interval` and re-sends each transfer is
+  the missing piece -- the index for it is already in the schema, and it needs no new logic, because
+  re-sending is exactly what the retry path already does.
+
+### Why the HTTP call is outside the transaction
+
+The PENDING row is committed *before* account-service is called, and the outcome is written in a
+second transaction afterwards. Both halves matter:
+
+- A transaction held open across the network call would hold its database connection for the whole
+  read timeout. A slow account-service would then drain the connection pool, and payment-service
+  would fall over because its dependency was merely slow.
+- If the payment were written in the same transaction as the outcome, a crash mid-call would roll the
+  payment back entirely -- leaving no record that a transfer with that id might have been posted. The
+  durable PENDING row *is* the recovery mechanism.
+
 ## Design decisions
 
 - **Multi-module Gradle build with a thin root project.** The root `build.gradle.kts` owns the
@@ -293,3 +364,27 @@ one system account per currency, found by `(account_type, currency)` rather than
   `PostgresTestBase` rather than a JUnit `@Container`: the `@Testcontainers` extension stops a static
   container once its declaring class finishes, which leaves every later test class talking to a closed
   port.
+- **The payment id is the transferId.** One identifier, generated once, carried across the service
+  boundary -- so a retry from any layer converges on the same movement. See
+  [The in-doubt payment](#the-in-doubt-payment).
+- **Idempotency is a unique constraint plus a request hash.** `UNIQUE (idempotency_key)` makes one key
+  name exactly one payment even under concurrent submission -- the losing insert raises, and the loser
+  reads back what the winner created rather than trusting a check-then-insert that has no guarantee.
+  The stored SHA-256 of the canonical request (`from|to|amount|currency`, not the raw bytes) is what
+  separates a retry from a reused key: same hash replays the stored payment, different hash is a 422.
+  Hashing the parsed fields rather than the body means reformatted JSON is still the same request.
+- **Explicit `TransactionTemplate` instead of `@Transactional`.** Where the transactions *end* is the
+  design here, and annotations hide that -- particularly since a `@Transactional` method called from
+  within the same bean is silently not transactional at all.
+- **Timeouts are configured, never defaulted.** An HTTP client with no read timeout holds a request
+  thread for as long as the far side stays silent, so one stuck dependency takes the whole service
+  with it. Connect 500ms, read 2s.
+- **Only 400/404/422 count as a refusal.** Any other 4xx is likelier to be a misrouted or malformed
+  request than a real decision, and treating that as FAILED would tell a customer their payment was
+  declined when nobody ever looked at it.
+- **Terminal states are enforced by a trigger.** `PENDING -> COMPLETED | FAILED` and nothing else: once
+  a customer has been told an outcome, no code path may quietly rewrite it.
+- **WireMock, not a mocked client, for the account-service tests.** The case that matters most -- a read
+  timeout -- does not exist above the socket. A mock can be told to throw; only a real server can be
+  told to go quiet and let the client's own timeout decide what happens. It runs with h2c disabled, so
+  it speaks plaintext HTTP/1.1 exactly like the Tomcat it stands in for.

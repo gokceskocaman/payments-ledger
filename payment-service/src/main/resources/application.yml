@@ -26,6 +26,13 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
+# The only thing this service talks to. Timeouts are explicit because the defaults are "forever":
+# see AccountServiceProperties for how these two numbers were chosen.
+account-service:
+  base-url: http://localhost:8081
+  connect-timeout: 500ms
+  read-timeout: 2s
+
 management:
   endpoints:
     web:
