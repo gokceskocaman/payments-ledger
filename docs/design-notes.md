@@ -308,6 +308,67 @@ why the batch is bounded and the send has its own timeout.
 - **Duplicates are real, not theoretical.** Any consumer that is not idempotent will eventually be
   wrong.
 
+## Consumer offsets, and when a message comes back
+
+An **offset** is a monotonic position within one partition. A consumer group stores, per
+`(group, topic, partition)`, the offset it intends to read next -- one number, kept in Kafka's
+`__consumer_offsets` topic. It is not a per-message acknowledgement: committing offset 105 asserts
+that everything below 105 is done, so offsets only make sense when a partition is processed in order
+by one consumer at a time. That is why Kafka gives a partition to exactly one member of a group.
+
+**Reading and committing are separate writes**, and everything interesting follows from the order
+they happen in:
+
+```
+  process then commit  (at-least-once)        commit then process  (at-most-once)
+  poll record @105                            poll record @105
+  INSERT processed_events; COMMIT             commit offset 106
+  commit offset 106                           INSERT processed_events; COMMIT
+      ^ crash here -> 105 is read again           ^ crash here -> 105 is never seen again
+        = duplicate, which dedup absorbs           = silent loss, which nothing can detect
+```
+
+This service does the first. `ack-mode: record` makes the container commit after each record's
+handler returns, and `enable-auto-commit: false` keeps a background timer from committing offsets for
+records that have only been *read*: a commit has to mean processed, not received.
+
+### When a record is delivered again
+
+Not an exhaustive list, but these are the ones that actually happen:
+
+| Cause | What happens |
+|---|---|
+| **Handler throws** | The container rolls back, seeks back to the record and retries it in place -- three times here, with capped exponential backoff. |
+| **Consumer crashes before committing** | Everything after the last committed offset is read again by whoever takes the partition. |
+| **Rebalance** | A member joining or leaving revokes partitions. Anything processed but not yet committed is redelivered to the new owner. |
+| **`max.poll.interval.ms` exceeded** | A handler that takes too long looks dead: the group evicts the member, reassigns the partition and redelivers. Slow processing *causes* duplicates. |
+| **Producer-side resend** | The outbox relay resends after a crash between publishing and marking the row sent -- a new record carrying an `eventId` that has already been consumed. |
+| **`auto-offset-reset` after offset expiry** | A group with no valid committed offset starts at `earliest` here, which replays the retained history. |
+
+Note that most of these are not failures of the consumer. A rebalance is routine, and a slow handler
+is a performance problem that quietly becomes a correctness problem without deduplication. This is
+why the `processed_events` primary key exists: it makes every one of these rows above a no-op rather
+than a second effect.
+
+### Retries and the dead-letter topic
+
+Retrying in place blocks the partition -- every record queued behind the failing one waits. So the
+policy has two halves:
+
+- **Retry what might pass:** a database failover, a lock held a moment too long, a blip. Three
+  attempts, exponential backoff capped at 2s.
+- **Do not retry what cannot pass:** a payload that will not parse is dead-lettered immediately.
+  `DefaultErrorHandler.addNotRetryableExceptions(JacksonException, IllegalArgumentException)` says so
+  explicitly. Waiting 2s to re-fail on invalid JSON only delays the partition.
+
+Once the attempts are exhausted, `DeadLetterPublishingRecoverer` copies the record to
+`payments.events.DLT` with the failure details in headers, the offset is committed, and the partition
+moves on. The failure becomes something to inspect, rather than an outage that grows a backlog.
+
+What is deliberately *not* here: nothing reprocesses the DLT. That is an operational decision -- a
+dead-lettered payment event needs a human to look at why before it is replayed, and an automatic
+DLT-to-source loop is how you build an infinite retry cycle by accident.
+
 ## Design decisions
 
 - **Multi-module Gradle build with a thin root project.** The root `build.gradle.kts` owns the
@@ -411,3 +472,15 @@ why the batch is bounded and the send has its own timeout.
   timeout -- does not exist above the socket. A mock can be told to throw; only a real server can be
   told to go quiet and let the client's own timeout decide what happens. It runs with h2c disabled, so
   it speaks plaintext HTTP/1.1 exactly like the Tomcat it stands in for.
+- **Consumer deduplication is a primary key, not a lookup.** `processed_events.event_id` is the
+  primary key and the insert is `ON CONFLICT DO NOTHING`, so claiming an event is one atomic
+  statement. Check-then-insert has a window between the two statements that a rebalance can walk
+  into, and catching a constraint violation instead would poison the transaction for no gain.
+- **`processed_events` lives in `infrastructure.messaging`, not `domain`.** It records what has been
+  *consumed*; it says nothing about money. Putting it beside `Account` would imply the ledger cares.
+- **The DLT is not reprocessed automatically.** A dead-lettered payment event should be looked at
+  before it is replayed; a DLT-to-source loop is an accidental infinite retry.
+- **`metadata.max.age.ms` is lowered to 10s on the consumer.** `payments.events` belongs to
+  payment-service, so it may not exist when account-service starts, and the five-minute default means
+  a consumer that boots first ignores the topic for five minutes after it appears. In a real
+  deployment topics are created by infrastructure rather than by whichever service starts first.

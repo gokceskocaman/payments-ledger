@@ -6,7 +6,8 @@ ledger where every movement writes exactly one DEBIT and one CREDIT row in a sin
 Money is always `Long` minor units, balances can never go negative, concurrent writers are serialised
 with ordered row locks, and a payment whose outcome is unknown stays `PENDING` rather than lying in
 either direction. Each service owns its own Postgres; they talk over HTTP, and payment events reach
-Kafka through a transactional outbox rather than a dual write.
+Kafka through a transactional outbox rather than a dual write, where account-service consumes them
+idempotently.
 
 ## Architecture
 
@@ -30,15 +31,17 @@ Kafka through a transactional outbox rather than a dual write.
        |  postgres-payment  |                        |  postgres-account  |
        |  payments          |                        |  accounts          |
        |  outbox_events     |                        |  ledger_entries    |
-       |       :5434        |                        |       :5433        |
-       +--------------------+                        +--------------------+
-                  |
-                  |  relay: claim (SKIP LOCKED) -> send -> mark sent
-                  v
-       +--------------------+
-       |   Kafka (KRaft)    |  topic payments.events, key = paymentId
-       |       :9092        |  PaymentCreated / Completed / Failed
-       +--------------------+
+       |       :5434        |                        |  processed_events  |
+       +--------------------+                        |       :5433        |
+                  |                                  +--------------------+
+                  |  relay: claim (SKIP LOCKED)                  ^
+                  |         -> send -> mark sent                 | consume, dedupe on eventId
+                  v                                              |
+       +-----------------------------------------------------------------+
+       |  Kafka (KRaft) :9092                                            |
+       |  payments.events      key = paymentId                           |
+       |  payments.events.DLT  after 3 retries                           |
+       +-----------------------------------------------------------------+
 ```
 
 One database per service; neither reads the other's tables. `transferId` is the payment's own id, so
@@ -160,6 +163,16 @@ times out, the payment stays `PENDING` rather than being guessed as FAILED, and 
 either posts the movement or replays the one already posted. `FAILED` is reserved for a definitive
 refusal; a timeout is an absence of information, not a decision.
 
+**Consumers deduplicate, because delivery is at-least-once.** account-service records every payment
+event in `processed_events`, whose primary key is the `eventId`. The insert is
+`ON CONFLICT DO NOTHING`, so claiming an event is one atomic statement rather than a check followed by
+a write that a rebalance could race. A redelivery -- from a handler failure, a consumer crash before
+its offset was committed, a rebalance, a slow handler evicted from the group, or the relay resending --
+finds the id taken and does nothing. Offsets are committed after the handler returns, never by a
+background timer, so a commit means processed rather than received. Failures are retried three times
+with capped backoff and then dead-lettered to `payments.events.DLT`; a payload that cannot be parsed
+skips the retries, because waiting will not make invalid JSON valid.
+
 **Events go through a transactional outbox, not a dual write.** A payment changes a Postgres row and
 should produce a Kafka message, and no transaction spans both. Writing the row then publishing loses
 the event on a crash; publishing then writing announces a payment that never existed. So the event is
@@ -185,15 +198,17 @@ The full reasoning, including the options that were rejected, is in
   RestClient with explicit timeouts, three-way outcome handling for the in-doubt case
 - Transactional outbox in payment-service: `PaymentCreated` / `PaymentCompleted` / `PaymentFailed`
   written with the state change, relayed to Kafka by a scheduled poller, keyed by payment id
+- Idempotent consumer in account-service: payment events recorded in `processed_events` keyed by
+  event id, duplicates skipped, retries with backoff and a dead-letter topic
 - RFC 7807 errors and Bean Validation across both services
-- 43 tests: Testcontainers Postgres and Kafka, WireMock for account-service, concurrency, timeout and
-  outbox cases
+- 47 tests: Testcontainers Postgres and Kafka, WireMock for account-service, concurrency, timeout,
+  outbox and duplicate-delivery cases
 
 **Next**
 
-- **A consumer, and outbox housekeeping** — nothing subscribes to `payments.events` yet, so the
-  idempotent-consumer half of the story is still theory. `outbox_events` also keeps every published
-  row and needs an archival job.
+- **Housekeeping** — `outbox_events` and `processed_events` both grow without bound and need
+  archival jobs. Nothing reprocesses the dead-letter topic either; that is deliberate, but it does
+  mean a dead-lettered event needs a human.
 - **Reconciliation job** — sweep `payments WHERE status = 'PENDING'` past a grace period and re-send
   the transfer. Today an in-doubt payment is only resolved when the caller retries; the partial index
   is already in the schema and the logic is the existing retry path.

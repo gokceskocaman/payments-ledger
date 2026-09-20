@@ -14,6 +14,9 @@ dependencies {
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
 
+    // Consumer only: this service subscribes to payment events, it publishes none.
+    implementation("org.springframework.kafka:spring-kafka")
+
     runtimeOnly("org.postgresql:postgresql")
 
     // Integration tests run against a real Postgres, never H2: the schema relies on partial
@@ -23,4 +26,5 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:junit-jupiter")
     testImplementation("org.testcontainers:postgresql")
+    testImplementation("org.testcontainers:kafka")
 }

@@ -26,6 +26,27 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: account-service
+      # Read the topic from the beginning the first time this group appears, so events published
+      # before the consumer existed are not silently skipped.
+      auto-offset-reset: earliest
+      # Offsets are committed by the listener container after the handler returns, never by a timer
+      # in the background: a commit must mean "this record was processed", not "this record was read".
+      enable-auto-commit: false
+      properties:
+        # payments.events belongs to payment-service, so it may not exist when this service starts.
+        # The default refresh is five minutes, which means a consumer that boots first would ignore
+        # the topic for five minutes after it appears. In production topics are created by
+        # infrastructure rather than by whichever service happens to start first.
+        metadata.max.age.ms: 10000
+    listener:
+      # Commit after every record rather than every batch. It costs one commit per record and buys
+      # the smallest possible redelivery window when the consumer dies mid-batch.
+      ack-mode: record
+
   data:
     web:
       pageable:
@@ -44,6 +65,17 @@ management:
   health:
     db:
       enabled: true
+
+payment-events:
+  topic: payments.events
+  group-id: account-service
+  dlt-topic: payments.events.DLT
+  dlt-partitions: 3
+  dlt-replicas: 1
+  max-retries: 3
+  retry-initial-interval: 200ms
+  retry-multiplier: 2.0
+  retry-max-interval: 2s
 
 logging:
   level:
