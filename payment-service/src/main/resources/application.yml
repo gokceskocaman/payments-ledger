@@ -52,6 +52,14 @@ account-service:
   connect-timeout: 500ms
   read-timeout: 2s
 
+security:
+  jwt:
+    # DEV ONLY. A symmetric secret: whoever holds it can mint tokens, not just verify them. It lives
+    # here so the project can be cloned and run; production replaces this whole block with
+    # spring.security.oauth2.resourceserver.jwt.jwk-set-uri and holds no signing material at all.
+    hmac-secret: ${JWT_HMAC_SECRET:dev-only-hs256-secret-not-for-production-0123456789}
+    issuer: ${JWT_ISSUER:payments-ledger-dev}
+
 management:
   endpoints:
     web:

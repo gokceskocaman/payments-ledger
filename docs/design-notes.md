@@ -369,6 +369,89 @@ What is deliberately *not* here: nothing reprocesses the DLT. That is an operati
 dead-lettered payment event needs a human to look at why before it is replayed, and an automatic
 DLT-to-source loop is how you build an infinite retry cycle by accident.
 
+## Authentication and authorisation
+
+Both services are OAuth2 **resource servers**. They never issue tokens; they validate the ones they
+are handed, locally -- signature, expiry, issuer -- so no network call is needed to authorise a request.
+That is the trade a JWT makes: fast, offline checks in exchange for tokens that cannot be revoked
+before they expire, which is why they are short-lived.
+
+```
+  customer                payment-service                account-service
+     |                          |                              |
+     |  POST /payments          |                              |
+     |  Bearer <customer JWT>   |                              |
+     |------------------------->|                              |
+     |            verify sig/exp/iss locally                   |
+     |            scope: payments:write -> authenticated       |
+     |                          |                              |
+     |                          |  POST /internal/transfers    |
+     |                          |  Bearer <service JWT>        |
+     |                          |----------------------------->|
+     |                          |        verify locally        |
+     |                          |        scope must contain    |
+     |                          |        ledger:internal       |
+     |                          |<-----------------------------|
+     |<-------------------------|                              |
+```
+
+Two distinct identities, deliberately. The customer's token authenticates a *person* to the payments
+API; it is never forwarded to the ledger. The call to `/internal/transfers` carries a *service*
+identity with the `ledger:internal` scope, so a leaked customer token cannot post ledger entries no
+matter how valid it is.
+
+### What is public, and why so little
+
+Only two things: `/actuator/health` (and `/actuator/info`), because an orchestrator has to be able to
+ask whether the process is alive before it has any credentials; and `/v3/api-docs` plus the Swagger
+UI, because an API description that needs a token to read is an API description nobody reads. Nothing
+in either exposes account data.
+
+Everything else is `anyRequest().authenticated()` -- **default deny**. A new endpoint is protected by
+omission, rather than by remembering to add a rule for it.
+
+### 401 versus 403
+
+They answer different questions, and conflating them makes debugging miserable:
+
+- **401 Unauthenticated** -- "I do not know who you are." No token, an expired token, a bad signature,
+  the wrong issuer. The response carries `WWW-Authenticate: Bearer` per RFC 6750.
+- **403 Insufficient scope** -- "I know who you are, and you may not do this." A valid customer token
+  presented to `/internal/**`. Retrying will not help; a different token might.
+
+Both come back as `application/problem+json`, like every other error these services produce.
+
+### CSRF is off, and that is correct
+
+CSRF protection exists because browsers attach *ambient* credentials -- cookies -- to cross-site
+requests automatically. These services have no cookies and no sessions: every request carries a
+bearer token that a caller had to add deliberately, and an attacker's page cannot add it. Disabling
+CSRF on a stateless bearer-token API removes ceremony, not protection.
+
+### The dev signing key
+
+`security.jwt.hmac-secret` in `application.yml` is a **symmetric HS256 secret**, which means anything
+holding it can *mint* tokens as well as verify them -- `scripts/dev-token.sh` does exactly that, and so
+does payment-service when it needs a service token. That is indefensible in production and perfectly
+fine on a laptop: it is checked into a public repository, so it grants nothing anywhere that matters.
+It buys the thing a portfolio project needs most, which is that `docker compose up` and two
+`bootRun`s give you a working system with no identity provider to install.
+
+### What changes in production
+
+| Here | Production |
+|---|---|
+| Symmetric HS256 secret in `application.yml` | `spring.security.oauth2.resourceserver.jwt.jwk-set-uri` pointing at the IdP. Tokens are signed with a private key the services never see, so a compromised service cannot mint tokens -- only verify them. Key rotation becomes the IdP's problem, handled by refetching the JWKS. |
+| `ServiceTokenProvider` self-signs a `ledger:internal` token | OAuth2 **client credentials**: payment-service authenticates to the IdP with its own client id and secret, and caches the token it gets back. The class's interface does not change -- only where the token comes from. |
+| `scripts/dev-token.sh` mints customer tokens | Customers get tokens from a real authorisation flow; nothing in the system can mint them. |
+| Issuer and expiry validated | Also audience (`aud`), so a token minted for another service cannot be replayed here. |
+| Secrets in `application.yml`, overridable by env var | Secrets from a secret manager (AWS Parameter Store or Secrets Manager), injected at deploy time and never in the image. |
+| Scopes: `payments:write`, `ledger:internal` | The same shape, but issued per client and reviewed. `/internal/**` would also be network-restricted -- a service mesh or security group -- so the scope check is the second line of defence rather than the only one. |
+| HTTP | TLS terminated at the load balancer, and mutual TLS between services if the threat model calls for it. A bearer token on plaintext HTTP is a bearer token anyone on the path can steal. |
+
+The important part is that none of these change the application's code: the resource-server
+configuration is nine lines of filter chain, and the swap is a property.
+
 ## Design decisions
 
 - **Multi-module Gradle build with a thin root project.** The root `build.gradle.kts` owns the
@@ -484,3 +567,15 @@ DLT-to-source loop is how you build an infinite retry cycle by accident.
   payment-service, so it may not exist when account-service starts, and the five-minute default means
   a consumer that boots first ignores the topic for five minutes after it appears. In a real
   deployment topics are created by infrastructure rather than by whichever service starts first.
+- **Resource servers, not an authorisation server.** Neither service issues tokens. Validation is
+  local, so authorising a request costs no network call -- the trade being that a JWT cannot be revoked
+  before it expires, which is why lifetimes are minutes.
+- **Two identities, never one.** The customer's token is not forwarded to the ledger. `/internal/**`
+  requires a service token with `ledger:internal`, so a leaked customer token cannot post entries.
+- **Default deny.** `anyRequest().authenticated()` with only health and the API docs allowed through,
+  so a new endpoint is protected by omission rather than by remembering it.
+- **The security config is duplicated in both services.** With two services a shared `common` module
+  costs more in coupling than it saves in lines; the third service is when that changes.
+- **springdoc examples are hand-written, not generated.** A generated example shows `"amount": 0`; a
+  written one shows `12000` and says it means EUR 120.00, which is the mistake the examples exist to
+  prevent.

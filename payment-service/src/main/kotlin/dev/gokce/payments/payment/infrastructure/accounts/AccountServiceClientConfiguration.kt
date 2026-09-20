@@ -20,8 +20,15 @@ class AccountServiceClientConfiguration {
     fun accountServiceRestClient(
         builder: RestClient.Builder,
         properties: AccountServiceProperties,
+        serviceTokens: ServiceTokenProvider,
     ): RestClient = builder
         .baseUrl(properties.baseUrl)
+        // Fetched per request rather than pinned as a default header, so a rotated or refreshed
+        // token takes effect without rebuilding the client.
+        .requestInterceptor { request, body, execution ->
+            request.headers.setBearerAuth(serviceTokens.token())
+            execution.execute(request, body)
+        }
         .requestFactory(
             ClientHttpRequestFactoryBuilder.detect().build(
                 ClientHttpRequestFactorySettings.defaults()

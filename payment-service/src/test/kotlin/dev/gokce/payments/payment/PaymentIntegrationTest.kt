@@ -12,18 +12,12 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.web.client.TestRestTemplate
-import org.springframework.http.HttpEntity
-import org.springframework.http.HttpHeaders
-import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
-import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.jdbc.core.JdbcTemplate
 import java.util.UUID
 
 class PaymentIntegrationTest @Autowired constructor(
-    private val rest: TestRestTemplate,
     private val payments: PaymentRepository,
     private val jdbc: JdbcTemplate,
 ) : PaymentServiceTestBase() {
@@ -134,7 +128,7 @@ class PaymentIntegrationTest @Autowired constructor(
             .isEqualTo("PENDING")
         assertThat(body["failureReason"].isNull).isTrue()
 
-        val fetched = rest.getForEntity("/payments/${body["id"].asText()}", JsonNode::class.java)
+        val fetched = getJson("/payments/${body["id"].asText()}", JsonNode::class.java)
         assertThat(fetched.body!!["status"].asText()).isEqualTo("PENDING")
     }
 
@@ -189,13 +183,8 @@ class PaymentIntegrationTest @Autowired constructor(
 
     @Test
     fun `a missing Idempotency-Key header is rejected`() {
-        val headers = HttpHeaders().apply { contentType = MediaType.APPLICATION_JSON }
-        val response = rest.exchange(
-            "/payments",
-            HttpMethod.POST,
-            HttpEntity(body(amount = 100), headers),
-            JsonNode::class.java,
-        )
+        // Authenticated, but with no Idempotency-Key: the header is required, not optional.
+        val response = postJson("/payments", body(amount = 100), JsonNode::class.java)
 
         assertThat(response.statusCode).isEqualTo(HttpStatus.BAD_REQUEST)
         assertThat(accountServiceRequests()).isZero()
@@ -223,7 +212,7 @@ class PaymentIntegrationTest @Autowired constructor(
 
     @Test
     fun `an unknown payment is a 404 problem detail`() {
-        val response = rest.getForEntity("/payments/${UUID.randomUUID()}", JsonNode::class.java)
+        val response = getJson("/payments/${UUID.randomUUID()}", JsonNode::class.java)
 
         assertThat(response.statusCode).isEqualTo(HttpStatus.NOT_FOUND)
         assertThat(response.body!!["type"].asText()).endsWith("/problems/payment-not-found")
@@ -269,13 +258,8 @@ class PaymentIntegrationTest @Autowired constructor(
 
     private fun pay(key: String, amount: Long): ResponseEntity<JsonNode> = payRaw(key, body(amount))
 
-    private fun payRaw(key: String, body: Map<String, Any>): ResponseEntity<JsonNode> {
-        val headers = HttpHeaders().apply {
-            contentType = MediaType.APPLICATION_JSON
-            set("Idempotency-Key", key)
-        }
-        return rest.exchange("/payments", HttpMethod.POST, HttpEntity(body, headers), JsonNode::class.java)
-    }
+    private fun payRaw(key: String, body: Map<String, Any>): ResponseEntity<JsonNode> =
+        postJson("/payments", body, JsonNode::class.java, extraHeaders = mapOf("Idempotency-Key" to key))
 
     private fun equalToValue(expected: String) =
         com.github.tomakehurst.wiremock.client.WireMock.equalTo(expected)

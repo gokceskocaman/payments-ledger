@@ -9,7 +9,6 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.data.domain.Pageable
 import org.springframework.http.HttpStatus
 import org.springframework.jdbc.core.JdbcTemplate
@@ -21,7 +20,6 @@ import java.util.UUID
  * would test a different database than the one we ship.
  */
 class AccountLedgerIntegrationTest @Autowired constructor(
-    private val rest: TestRestTemplate,
     private val accounts: AccountRepository,
     private val ledgerEntries: LedgerEntryRepository,
     private val jdbc: JdbcTemplate,
@@ -100,7 +98,7 @@ class AccountLedgerIntegrationTest @Autowired constructor(
         val accountId = createAccount("Margaret Hamilton")["id"].asLong()
         listOf(1_000L, 2_000L, 3_000L).forEach { deposit(accountId, UUID.randomUUID(), it) }
 
-        val page = rest.getForEntity("/accounts/$accountId/entries?page=0&size=2", JsonNode::class.java).body!!
+        val page = getJson("/accounts/$accountId/entries?page=0&size=2", JsonNode::class.java).body!!
 
         assertThat(page["totalElements"].asLong()).isEqualTo(3)
         assertThat(page["totalPages"].asInt()).isEqualTo(2)
@@ -129,7 +127,7 @@ class AccountLedgerIntegrationTest @Autowired constructor(
 
     @Test
     fun `an invalid request body is answered with field-level problem details`() {
-        val response = rest.postForEntity(
+        val response = postJson(
             "/accounts",
             mapOf("ownerName" to "   ", "currency" to "eur"),
             JsonNode::class.java,
@@ -146,7 +144,7 @@ class AccountLedgerIntegrationTest @Autowired constructor(
     fun `a missing json field is reported by name`() {
         val accountId = createAccount("Radia Perlman")["id"].asLong()
 
-        val response = rest.postForEntity(
+        val response = postJson(
             "/accounts/$accountId/deposits",
             mapOf("amount" to 100, "currency" to "EUR"),
             JsonNode::class.java,
@@ -158,7 +156,7 @@ class AccountLedgerIntegrationTest @Autowired constructor(
 
     @Test
     fun `an unknown account is a 404 problem detail`() {
-        val response = rest.getForEntity("/accounts/999999", JsonNode::class.java)
+        val response = getJson("/accounts/999999", JsonNode::class.java)
 
         assertThat(response.statusCode).isEqualTo(HttpStatus.NOT_FOUND)
         assertThat(response.body!!["type"].asText()).endsWith("/problems/account-not-found")
@@ -186,7 +184,7 @@ class AccountLedgerIntegrationTest @Autowired constructor(
     }
 
     private fun createAccount(ownerName: String, currency: String = "EUR"): JsonNode {
-        val response = rest.postForEntity(
+        val response = postJson(
             "/accounts",
             mapOf("ownerName" to ownerName, "currency" to currency),
             JsonNode::class.java,
@@ -196,13 +194,13 @@ class AccountLedgerIntegrationTest @Autowired constructor(
     }
 
     private fun getAccount(id: Long): JsonNode =
-        rest.getForEntity("/accounts/$id", JsonNode::class.java).body!!
+        getJson("/accounts/$id", JsonNode::class.java).body!!
 
     private fun deposit(accountId: Long, transferId: UUID, amount: Long) =
         depositRaw(accountId, transferId, amount, "EUR")
 
     private fun depositRaw(accountId: Long, transferId: UUID, amount: Long, currency: String) =
-        rest.postForEntity(
+        postJson(
             "/accounts/$accountId/deposits",
             mapOf("transferId" to transferId, "amount" to amount, "currency" to currency),
             JsonNode::class.java,

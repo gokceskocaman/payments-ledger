@@ -7,11 +7,14 @@ springBoot = "3.5.0"
 springDependencyManagement = "1.1.7"
 # Not managed by the Spring Boot BOM, so it is pinned here.
 wiremock = "3.13.1"
+springdoc = "2.8.9"
 
 [libraries]
 # The shaded "standalone" build: WireMock embeds its own Jetty, and the unshaded artifact drags a
 # second Jetty and servlet API onto the test classpath next to Spring Boot's Tomcat.
 wiremock = { module = "org.wiremock:wiremock-standalone", version.ref = "wiremock" }
+# Serves /v3/api-docs and the Swagger UI. Not managed by the Spring Boot BOM either.
+springdoc-openapi = { module = "org.springdoc:springdoc-openapi-starter-webmvc-ui", version.ref = "springdoc" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

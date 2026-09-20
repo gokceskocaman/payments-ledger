@@ -7,7 +7,6 @@ import dev.gokce.payments.account.infrastructure.persistence.LedgerEntryReposito
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.data.domain.Pageable
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
@@ -17,7 +16,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class InternalTransferIntegrationTest @Autowired constructor(
-    private val rest: TestRestTemplate,
     private val accounts: AccountRepository,
     private val ledgerEntries: LedgerEntryRepository,
 ) : PostgresTestBase() {
@@ -224,7 +222,7 @@ class InternalTransferIntegrationTest @Autowired constructor(
         val source = fundedAccount("Bjarne Stroustrup", 5_000)
         val destination = createAccount("James Gosling")
 
-        val response = rest.postForEntity(
+        val response = postJson(
             "/internal/transfers",
             mapOf(
                 "transferId" to UUID.randomUUID(),
@@ -234,6 +232,7 @@ class InternalTransferIntegrationTest @Autowired constructor(
                 "currency" to "USD",
             ),
             JsonNode::class.java,
+            scope = DevTokens.SERVICE_SCOPE,
         )
 
         assertThat(response.statusCode).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY)
@@ -246,7 +245,7 @@ class InternalTransferIntegrationTest @Autowired constructor(
         from: Long,
         to: Long,
         amount: Long,
-    ): ResponseEntity<JsonNode> = rest.postForEntity(
+    ): ResponseEntity<JsonNode> = postJson(
         "/internal/transfers",
         mapOf(
             "transferId" to transferId,
@@ -256,10 +255,12 @@ class InternalTransferIntegrationTest @Autowired constructor(
             "currency" to "EUR",
         ),
         JsonNode::class.java,
+        // /internal/** is service-to-service: a customer token is rejected with 403 by design.
+        scope = DevTokens.SERVICE_SCOPE,
     )
 
     private fun createAccount(ownerName: String): Long {
-        val response = rest.postForEntity(
+        val response = postJson(
             "/accounts",
             mapOf("ownerName" to ownerName, "currency" to "EUR"),
             JsonNode::class.java,
@@ -270,7 +271,7 @@ class InternalTransferIntegrationTest @Autowired constructor(
 
     private fun fundedAccount(ownerName: String, amount: Long): Long {
         val id = createAccount(ownerName)
-        val response = rest.postForEntity(
+        val response = postJson(
             "/accounts/$id/deposits",
             mapOf("transferId" to UUID.randomUUID(), "amount" to amount, "currency" to "EUR"),
             JsonNode::class.java,

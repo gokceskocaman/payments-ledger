@@ -5,9 +5,9 @@ payment requests and is idempotent on an `Idempotency-Key`; `account-service` ow
 ledger where every movement writes exactly one DEBIT and one CREDIT row in a single transaction.
 Money is always `Long` minor units, balances can never go negative, concurrent writers are serialised
 with ordered row locks, and a payment whose outcome is unknown stays `PENDING` rather than lying in
-either direction. Each service owns its own Postgres; they talk over HTTP, and payment events reach
-Kafka through a transactional outbox rather than a dual write, where account-service consumes them
-idempotently.
+either direction. Both are OAuth2 resource servers validating JWTs locally. Each owns its own
+Postgres; they talk over HTTP, and payment events reach Kafka through a transactional outbox rather
+than a dual write, where account-service consumes them idempotently.
 
 ## Architecture
 
@@ -80,7 +80,20 @@ Then run each service in its own shell:
 curl -s localhost:8081/actuator/health && curl -s localhost:8082/actuator/health
 ```
 
-`"status":"UP"` with a `db` component means Flyway ran and the pool reached Postgres. Tests need only
+`"status":"UP"` with a `db` component means Flyway ran and the pool reached Postgres. Health and the
+API docs are the only endpoints that need no token; browse the docs at
+[localhost:8081/swagger-ui.html](http://localhost:8081/swagger-ui.html) and
+[localhost:8082/swagger-ui.html](http://localhost:8082/swagger-ui.html).
+
+Everything else needs a bearer token. Mint one locally:
+
+```bash
+export TOKEN=$(scripts/dev-token.sh)
+```
+
+That signs a JWT with the symmetric dev secret in `application.yml` — worthless anywhere but your
+laptop, and deliberately so. `scripts/dev-token.sh ledger:internal` mints the *service* token that
+`/internal/**` requires; payment-service mints its own when it calls account-service. Tests need only
 Docker — `./gradlew test` starts its own Postgres via Testcontainers and a WireMock stand-in for
 account-service.
 
@@ -90,22 +103,23 @@ Create two accounts. On a fresh database they come back as ids **2 and 3** — i
 account the migration seeds, and it is not a customer account:
 
 ```bash
-curl -s -X POST localhost:8081/accounts -H 'Content-Type: application/json' \
-  -d '{"ownerName":"Carol","currency":"EUR"}'
+curl -s -X POST localhost:8081/accounts -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"ownerName":"Carol","currency":"EUR"}'
 ```
 
 Fund one. The deposit debits the funding account and credits Carol, so double entry still holds:
 
 ```bash
-curl -s -X POST localhost:8081/accounts/2/deposits -H 'Content-Type: application/json' \
+curl -s -X POST localhost:8081/accounts/2/deposits -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
   -d '{"transferId":"11111111-1111-1111-1111-111111111111","amount":50000,"currency":"EUR"}'
 ```
 
 Make a payment. `amount` is minor units, so 12000 is EUR 120.00:
 
 ```bash
-curl -s -X POST localhost:8082/payments -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: order-4711' \
+curl -s -X POST localhost:8082/payments -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: order-4711' \
   -d '{"fromAccountId":2,"toAccountId":3,"amount":12000,"currency":"EUR"}'
 ```
 
@@ -121,15 +135,17 @@ the payment is created with `"status":"FAILED"` and a reason, while the ledger s
 Read a payment, an account, and its ledger entries:
 
 ```bash
-curl -s localhost:8082/payments/f48631d1-f92d-4f5b-b657-fe882ab7fdc9
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8082/payments/f48631d1-f92d-4f5b-b657-fe882ab7fdc9
 ```
 
 ```bash
-curl -s localhost:8081/accounts/2 && curl -s 'localhost:8081/accounts/2/entries?page=0&size=20'
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8081/accounts/2 \
+  && curl -s -H "Authorization: Bearer $TOKEN" 'localhost:8081/accounts/2/entries?page=0&size=20'
 ```
 
 Errors are RFC 7807 `application/problem+json` throughout, with field-level detail on validation
-failures.
+failures. Without a token you get **401** `unauthenticated`; with a customer token on `/internal/**`
+you get **403** `insufficient-scope`.
 
 ## Design decisions
 
@@ -162,6 +178,19 @@ a retry from a reused key. Critically, **the payment id is the `transferId`** �
 times out, the payment stays `PENDING` rather than being guessed as FAILED, and simply asking again
 either posts the movement or replays the one already posted. `FAILED` is reserved for a definitive
 refusal; a timeout is an absence of information, not a decision.
+
+**Both services are OAuth2 resource servers, and they hold two distinct identities.** Tokens are
+validated locally — signature, expiry, issuer — so authorising a request costs no network call. Only
+health and the API docs are public; everything else is `anyRequest().authenticated()`, so a new
+endpoint is protected by omission rather than by remembering. `/internal/**` additionally demands the
+`ledger:internal` scope, and the customer's token is **never** forwarded to the ledger: payment-service
+presents a service identity of its own, so a leaked customer token cannot post ledger entries however
+valid it is. 401 and 403 are kept distinct — "I don't know who you are" versus "I know, and you may
+not" — because conflating them makes debugging miserable. CSRF is disabled, correctly: there are no
+cookies and no sessions, so there is no ambient credential for a cross-site request to ride on. The
+dev signing secret is symmetric and checked in, which means anything holding it can mint tokens —
+fine on a laptop, and [docs/design-notes.md](docs/design-notes.md) lists exactly what production
+swaps it for.
 
 **Consumers deduplicate, because delivery is at-least-once.** account-service records every payment
 event in `processed_events`, whose primary key is the `eventId`. The insert is
@@ -200,9 +229,12 @@ The full reasoning, including the options that were rejected, is in
   written with the state change, relayed to Kafka by a scheduled poller, keyed by payment id
 - Idempotent consumer in account-service: payment events recorded in `processed_events` keyed by
   event id, duplicates skipped, retries with backoff and a dead-letter topic
+- OAuth2 resource server on both services: JWT validated locally, default deny, `/internal/**`
+  restricted to a service scope, RFC 7807 401/403
+- springdoc-openapi on both services with hand-written request and response examples
 - RFC 7807 errors and Bean Validation across both services
-- 47 tests: Testcontainers Postgres and Kafka, WireMock for account-service, concurrency, timeout,
-  outbox and duplicate-delivery cases
+- 65 tests: Testcontainers Postgres and Kafka, WireMock for account-service, concurrency, timeout,
+  outbox, duplicate-delivery and security cases
 
 **Next**
 
@@ -212,9 +244,8 @@ The full reasoning, including the options that were rejected, is in
 - **Reconciliation job** — sweep `payments WHERE status = 'PENDING'` past a grace period and re-send
   the transfer. Today an in-doubt payment is only resolved when the caller retries; the partial index
   is already in the schema and the logic is the existing retry path.
-- **Security** — OAuth2 resource server with JWT, `/internal/**` restricted to service-to-service
-  callers rather than merely named internal.
+- **A real identity provider** — swap the symmetric dev secret for `jwk-set-uri`, and
+  `ServiceTokenProvider` for OAuth2 client credentials. Add audience validation.
 - **CI** — GitHub Actions running `./gradlew build` with Testcontainers, plus ktlint or detekt.
-- **API docs** — springdoc-openapi on both services.
 - **AWS** — Dockerfiles, ECS Fargate or EKS, RDS for Postgres, MSK for Kafka, secrets out of
   `application.yml` and into Parameter Store.

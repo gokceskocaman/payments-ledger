@@ -54,6 +54,14 @@ spring:
         # Without a cap, ?size=1000000 is a denial-of-service request against the ledger.
         max-page-size: 100
 
+security:
+  jwt:
+    # DEV ONLY. A symmetric secret: whoever holds it can mint tokens, not just verify them. It lives
+    # here so the project can be cloned and run; production replaces this whole block with
+    # spring.security.oauth2.resourceserver.jwt.jwk-set-uri and holds no signing material at all.
+    hmac-secret: ${JWT_HMAC_SECRET:dev-only-hs256-secret-not-for-production-0123456789}
+    issuer: ${JWT_ISSUER:payments-ledger-dev}
+
 management:
   endpoints:
     web:

@@ -1,6 +1,7 @@
 package dev.gokce.payments.account.api
 
 import dev.gokce.payments.account.application.PostedTransfer
+import io.swagger.v3.oas.annotations.media.Schema
 import dev.gokce.payments.account.domain.Account
 import dev.gokce.payments.account.domain.Direction
 import dev.gokce.payments.account.domain.LedgerEntry
@@ -19,18 +20,25 @@ private const val CURRENCY_MESSAGE = "must be a 3-letter uppercase ISO 4217 code
 data class CreateAccountRequest(
     @field:NotBlank
     @field:Size(max = 200)
+    @field:Schema(example = "Ada Lovelace", description = "Name of the account holder")
     val ownerName: String,
 
     @field:Pattern(regexp = CURRENCY_PATTERN, message = CURRENCY_MESSAGE)
+    @field:Schema(example = "EUR", description = "ISO 4217 alphabetic code")
     val currency: String,
 )
 
 data class DepositRequest(
     /** Client-supplied, so a retried deposit is recognised instead of posted twice. */
+    @field:Schema(
+        example = "6f1e2d3c-4b5a-4968-8877-665544332211",
+        description = "Idempotency key for this movement. Replaying it returns the original result.",
+    )
     val transferId: UUID,
 
     /** Minor units, e.g. 25000 for EUR 250.00. Never a decimal. */
     @field:Positive
+    @field:Schema(example = "25000", description = "Amount in minor units; 25000 means EUR 250.00")
     val amount: Long,
 
     @field:Pattern(regexp = CURRENCY_PATTERN, message = CURRENCY_MESSAGE)
@@ -77,11 +85,12 @@ data class TransferResponse(
     }
 }
 
+@Schema(description = "An account and its balance, derived from the ledger entries")
 data class AccountResponse(
-    val id: Long,
-    val ownerName: String,
-    val currency: String,
-    val balance: Long,
+    @field:Schema(example = "2") val id: Long,
+    @field:Schema(example = "Ada Lovelace") val ownerName: String,
+    @field:Schema(example = "EUR") val currency: String,
+    @field:Schema(example = "25000", description = "Minor units") val balance: Long,
 ) {
     companion object {
         fun from(account: Account) = AccountResponse(

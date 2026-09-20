@@ -17,12 +17,7 @@ import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
-import org.springframework.boot.test.web.client.TestRestTemplate
-import org.springframework.http.HttpEntity
-import org.springframework.http.HttpHeaders
-import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
-import org.springframework.http.MediaType
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.UUID
@@ -32,7 +27,6 @@ import java.util.UUID
  * real Kafka broker, and the rows are marked published only once the broker has them.
  */
 class OutboxIntegrationTest @Autowired constructor(
-    private val rest: TestRestTemplate,
     private val outbox: OutboxEventRepository,
     private val outboxProperties: OutboxProperties,
     private val objectMapper: ObjectMapper,
@@ -203,17 +197,18 @@ class OutboxIntegrationTest @Autowired constructor(
         amount: Long,
         expectedStatus: HttpStatus = HttpStatus.CREATED,
     ): UUID {
-        val headers = HttpHeaders().apply {
-            contentType = MediaType.APPLICATION_JSON
-            set("Idempotency-Key", key)
-        }
         val body = mapOf(
             "fromAccountId" to 1,
             "toAccountId" to 2,
             "amount" to amount,
             "currency" to "EUR",
         )
-        val response = rest.exchange("/payments", HttpMethod.POST, HttpEntity(body, headers), JsonNode::class.java)
+        val response = postJson(
+            "/payments",
+            body,
+            JsonNode::class.java,
+            extraHeaders = mapOf("Idempotency-Key" to key),
+        )
         assertThat(response.statusCode).isEqualTo(expectedStatus)
         return UUID.fromString(response.body!!["id"].asText())
     }

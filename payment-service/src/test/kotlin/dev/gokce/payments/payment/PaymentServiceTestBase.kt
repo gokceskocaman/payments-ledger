@@ -81,4 +81,49 @@ abstract class PaymentServiceTestBase {
 
     protected fun accountServiceRequests(): Int =
         accountService.findAll(WireMock.postRequestedFor(WireMock.urlEqualTo("/internal/transfers"))).size
+
+    @org.springframework.beans.factory.annotation.Autowired
+    protected lateinit var jwtProperties: dev.gokce.payments.payment.infrastructure.security.JwtProperties
+
+    @org.springframework.beans.factory.annotation.Autowired
+    protected lateinit var http: org.springframework.boot.test.web.client.TestRestTemplate
+
+    /**
+     * Every request in these tests carries a bearer token, because every endpoint except health and
+     * the API docs requires one. The token is minted with the service's own configured secret, so the
+     * real decoder validates it.
+     */
+    protected fun jsonHeaders(
+        scope: String = DevTokens.CUSTOMER_SCOPE,
+        extra: Map<String, String> = emptyMap(),
+    ): org.springframework.http.HttpHeaders =
+        org.springframework.http.HttpHeaders().apply {
+            contentType = org.springframework.http.MediaType.APPLICATION_JSON
+            setBearerAuth(DevTokens.signed(jwtProperties, scope))
+            extra.forEach { (name, value) -> set(name, value) }
+        }
+
+    protected fun <T> getJson(
+        url: String,
+        type: Class<T>,
+        scope: String = DevTokens.CUSTOMER_SCOPE,
+    ): org.springframework.http.ResponseEntity<T> = http.exchange(
+        url,
+        org.springframework.http.HttpMethod.GET,
+        org.springframework.http.HttpEntity<Void>(jsonHeaders(scope)),
+        type,
+    )
+
+    protected fun <T> postJson(
+        url: String,
+        body: Any,
+        type: Class<T>,
+        scope: String = DevTokens.CUSTOMER_SCOPE,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): org.springframework.http.ResponseEntity<T> = http.exchange(
+        url,
+        org.springframework.http.HttpMethod.POST,
+        org.springframework.http.HttpEntity(body, jsonHeaders(scope, extraHeaders)),
+        type,
+    )
 }

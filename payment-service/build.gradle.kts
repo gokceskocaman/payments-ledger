@@ -9,6 +9,12 @@ dependencies {
     // so @Valid on a request body is silently ignored without Hibernate Validator.
     implementation("org.springframework.boot:spring-boot-starter-validation")
 
+    // Validates the JWT on every request. The resource server never issues tokens; it only checks
+    // them, which is why it needs no client credentials of its own.
+    implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
+
+    implementation(libs.springdoc.openapi)
+
     // Flyway 10+ ships database support in separate modules; without the postgresql one
     // startup fails with "Unsupported Database: PostgreSQL".
     implementation("org.flywaydb:flyway-core")
